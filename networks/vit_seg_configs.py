@@ -45,7 +45,6 @@ def get_r50_b16_config():
     config.data = ml_collections.ConfigDict()
     config.data.img_size=256#6144
     config.data.in_chans=3
-    config.n_classes = 6
     config.patches.grid = (4, 4)
     config.resnet = ml_collections.ConfigDict()
     config.resnet.num_layers = (3, 4, 6, 3)
@@ -61,8 +60,8 @@ def get_r50_b16_config():
     #config.pretrained_path = '../model/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz' #yuxunlian
     config.decoder_channels = (512,256,128,64)#(256,128,64,16)##1024,512,256,128,64)#(2048,1024,512,256,128)#(256, 128, 64, 16)
     config.skip_channels = [512,256,128,64]#[256,128,64,16]#[512,256,128,64,16]#[512,256,128,64,32]#[1024,512,256,128,64]#[512, 256, 64, 16]
-    config.n_classes = 6
-    config.n_skip = 4
+    config.n_classes = 7
+    config.n_skip = 3
     config.activation = 'softmax'
 
     return config

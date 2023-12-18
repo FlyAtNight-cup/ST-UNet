@@ -7,6 +7,7 @@ import SimpleITK as sitk
 import tifffile
 from pathlib import Path
 import cv2
+import torch.nn.functional as F
 
 from torch.autograd import Variable
 try:

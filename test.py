@@ -15,7 +15,7 @@ from datasets.dataset_synapse import Synapse_dataset
 from utils import test_single_volume
 from networks.vit_seg_modeling import VisionTransformer as ViT_seg
 from networks.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
-from torchsummary import summary
+from torchinfo import summary
 from torchvision.models import resnet50
 from thop import profile
 

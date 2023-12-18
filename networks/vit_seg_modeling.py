@@ -201,10 +201,10 @@ class Encoder(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, config, img_size):
+    def __init__(self, config):
         super(Transformer, self).__init__()
-        img_size = _pair(img_size)
-        #print(img_size)
+        img_size = _pair(config['data']['img_size'])
+
         self.hybrid_model = TransResNetV2(config, block_units=config.resnet.num_layers, width_factor=config.resnet.width_factor)
 
     def forward(self, input):
@@ -351,13 +351,12 @@ class DecoderCup(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, config, img_size=256, num_classes=6, zero_head=False):
+    def __init__(self, config, zero_head=False):
         super(VisionTransformer, self).__init__()
-        self.num_classes = num_classes
         self.zero_head = zero_head
 
-        self.classifier = config.classifier
-        self.transformer = Transformer(config, img_size)
+        # self.classifier = config.classifier
+        self.transformer = Transformer(config)
         self.decoder = DecoderCup(config)
         self.segmentation_head = SegmentationHead(
             in_channels=16,
