@@ -1,4 +1,6 @@
 from networks.vit_seg_modeling import CONFIGS, VisionTransformer
+from networks.segcd_net import SegCDNet
+from networks.segm import get_segmenter
 from torchinfo import summary
 import torch
 import os
@@ -16,6 +18,7 @@ from lightning.pytorch.utilities.types import EVAL_DATALOADERS, STEP_OUTPUT, TRA
 from sklearn.model_selection import KFold
 from torch import optim
 import random
+from sklearn.metrics import confusion_matrix, classification_report
 
 def read_images(image_paths, crop_size = 256) -> List[Image.Image]:
     images = []
@@ -27,7 +30,6 @@ def read_images(image_paths, crop_size = 256) -> List[Image.Image]:
         for i in range(width // crop_size):
             for j in range(height // crop_size):
                 images.append(image.crop((i * crop_size, j * crop_size, (i + 1) * crop_size, (j + 1) * crop_size)))
-    
     return images
     
 
@@ -58,7 +60,7 @@ class SecondDataset(Dataset):
         image_tensor = ToTensor()(image)
         label_tensor = ToTensor()(label)
         
-        return image_tensor, label_tensor.squeeze()
+        return image_tensor, label_tensor.squeeze().long()
     
     def __len__(self):
         return len(self.images)
@@ -159,8 +161,8 @@ class LitVisionTransformer(pl.LightningModule):
         fp = np.zeros(self.config["n_classes"] - 1)
         fn = np.zeros(self.config["n_classes"] - 1)
         out = torch.argmax(torch.softmax(ot, dim=1), dim=1).squeeze(0)
-        prediction = out.cpu().detach().numpy()
-        label = lt.cpu().detach().numpy()
+        prediction = out.detach().cpu().numpy()
+        label = lt.detach().cpu().numpy()
         for cat in range(self.config["n_classes"] - 1):
             tp[cat] += ((prediction == cat) & (label == cat) & (label < self.config["n_classes"] - 1)).sum()
             fp[cat] += ((prediction == cat) & (label != cat) & (label < self.config["n_classes"] - 1)).sum()
@@ -173,15 +175,113 @@ class LitVisionTransformer(pl.LightningModule):
         return loss
 
 
+class LitSeg(pl.LightningModule):
+    def __init__(self, classes=['unchanged', 'water', 'ground', 'low_vegetation', 'tree', 'building', 'sports_field'], base_lr=1e-2) -> None:
+        super().__init__()
+        num_classes = len(classes)
+        self.num_classes = num_classes
+        self.classes = classes
+        
+        self.net = SegCDNet(num_classes=num_classes)
+        # self.net = get_segmenter()
+
+        self.criterion = CrossEntropyLoss()
+        self.base_lr = base_lr
+        self.train_loss = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        self.val_loss = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        
+        self.val_cm = torch.zeros((num_classes, num_classes), dtype=torch.long, device=self.device)
+        self.num_of_trian_batches = 0
+        self.num_of_val_batches = 0
+    
+    def configure_optimizers(self) -> OptimizerLRScheduler:
+        return optim.SGD(self.net.parameters(), lr=self.base_lr, momentum=0.9, weight_decay=0.0001)
+    
+    def forward(self, it: Tensor) -> Tensor:
+        return self.net(it)
+    
+    def backward(self, loss: Tensor) -> None:
+        loss.backward()
+    
+    def on_train_epoch_start(self) -> None:
+        self.num_of_trian_batches = 0
+        self.train_loss = self.train_loss.zero_().to(self.device)
+    
+    def training_step(self, batch) -> STEP_OUTPUT:
+        it, lt = batch
+        it: Tensor
+        lt: Tensor
+        ot: Tensor = self(it)
+        loss: Tensor = self.criterion(ot, lt)
+        self.train_loss = self.train_loss + loss
+        self.num_of_trian_batches = self.num_of_trian_batches + 1
+        return loss
+    
+    def on_train_epoch_end(self) -> None:
+        self.log('loss/train', self.train_loss / self.num_of_trian_batches, sync_dist=True)
+        
+    def on_validation_epoch_start(self) -> None:
+        self.num_of_val_batches = 0
+        self.val_loss = self.val_loss.zero_().to(self.device)
+        self.val_cm = self.val_cm.zero_().to(self.device)
+    
+    def validation_step(self, batch) -> STEP_OUTPUT:
+        it, lt = batch
+        it: Tensor
+        lt: Tensor
+        ot: Tensor = self(it)
+        loss: Tensor = self.criterion(ot, lt)
+        self.val_loss = self.val_loss + loss
+        self.num_of_val_batches = self.num_of_val_batches + 1
+        
+        pt = torch.argmax(ot, 1)
+        
+        cm = torch.tensor([[((lt == i) & (pt == j)).sum() for j in range(self.num_classes)] 
+                           for i in range(self.num_classes)], dtype=torch.long, device=self.device)
+        
+        self.val_cm = self.val_cm + cm
+        
+        return loss
+
+    def on_validation_epoch_end(self) -> None:
+        self.log('loss/val', self.val_loss / self.num_of_val_batches, sync_dist=True)
+        self.log('val/acc', self.val_cm.trace() / self.val_cm.sum(), sync_dist=True)
+        mp = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        mr = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        mf1 = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        miou = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        for i in range(self.num_classes):
+            precision = self.val_cm[i, i] / (self.val_cm[i, :].sum() + 1e-10)
+            recall = self.val_cm[i, i] / (self.val_cm[:, i].sum() + 1e-10)
+            f1_score = 2 * precision * recall / (precision + recall + 1e-10)
+            iou = self.val_cm[i, i] / (self.val_cm[i, :].sum() + self.val_cm[:, i].sum() - 2 * self.val_cm[i, i] + 1e-10)
+            mp = mp + precision
+            mr = mr + recall
+            mf1 = mf1 + f1_score
+            miou = miou + iou
+            self.log(f'metrics/precision_{self.classes[i]}', precision, sync_dist=True)
+            self.log(f'metrics/recall_{self.classes[i]}', recall, sync_dist=True)
+            self.log(f'metrics/f1_score_{self.classes[i]}', f1_score, sync_dist=True)
+            self.log(f'metrics/iou_{self.classes[i]}', iou, sync_dist=True)
+        self.log('mean/precison', mp, sync_dist=True)
+        self.log('mean/recall', mr, sync_dist=True)
+        self.log('mean/f1_score', mf1, sync_dist=True)
+        self.log('mean/iou', miou, sync_dist=True)
+    
+
 if __name__ == '__main__':
+    
     data_root = '/root/remote_sensing/second_dataset'
     mode = ['train', 'val']
-    n_splits = 5
-    devices = [1, 2]
-    max_epochs = 100
-    seed = 1234
+    n_splits = 0
+    devices = [0, 1, 2]
+    max_epochs = 200
+    seed = 3407
+    batch_size = 12
     strategy = 'ddp_find_unused_parameters_true'
     
+    data_model = KFlodDataModule(data_root, mode=mode, batch_size=batch_size, n_splits=n_splits)
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -191,8 +291,7 @@ if __name__ == '__main__':
         max_epochs=max_epochs,
         strategy=strategy
     )
-    model = LitVisionTransformer()
-    data_model = KFlodDataModule(data_root, mode=mode, n_splits=n_splits)
+    model = LitSeg()
     
     if n_splits == 0:
         trainer.fit(model, datamodule=data_model)
